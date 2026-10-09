@@ -43,6 +43,39 @@ def _full_url(link: str) -> str:
     return "https://www.agoda.com" + link
 
 
+def _card_link(data: dict[str, Any]) -> str | None:
+    """Best available URL for a card.
+
+    Priority: hotel property link -> flight booking URL -> Agoda place URL
+    (built from placeToken) -> Google Maps link from coordinates/placeId.
+    """
+    link = data.get("propertyLink") or data.get("navUrl") or data.get("bookingUrl")
+    if link:
+        return _full_url(link)
+    place_token = data.get("placeToken")
+    if isinstance(place_token, str) and place_token:
+        return f"https://www.agoda.com/place/{place_token}"
+    lat = data.get("latitude")
+    lng = data.get("longitude")
+    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+        return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+    place_id = data.get("placeId")
+    if isinstance(place_id, str) and place_id:
+        return f"https://www.google.com/maps/place/?place_id={place_id}"
+    return None
+
+
+def _card_kind(item: dict[str, Any], data: dict[str, Any], key: str) -> str:
+    """A human-readable card type, preferring the API's own type label."""
+    kind = (
+        data.get("place_type")
+        or data.get("displayCategory")
+        or item.get("type")
+        or {"accommodations": "Hotel", "flights": "Flight"}.get(key, key)
+    )
+    return str(kind).capitalize() if isinstance(kind, str) else str(kind)
+
+
 def _renderprops(widget: dict[str, Any]) -> dict[str, Any] | None:
     """Widget cards arrive either as WidgetData events or embedded on the final message."""
     if widget.get("type") not in (None, "WidgetData"):
@@ -128,10 +161,14 @@ def _extract_cards(widgets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 reviews = d.get("reviews") or {}
                 pricing = d.get("pricing") or {}
                 address = d.get("address") or {}
-                kind = item.get("type") or (
-                    {"accommodations": "Hotel", "flights": "Flight"}.get(key, key)
-                )
+                kind = _card_kind(item, d, key)
                 flight_title, flight_detail = _flight_bits(d)
+                price = _price_label(pricing, d)
+                if not price and d.get("totalPriceIncludingTax") is not None:
+                    amount = d.get("totalPriceIncludingTax")
+                    currency = d.get("currency")
+                    price = f"{amount} {currency}".strip() if currency else str(amount)
+                image = d.get("imageUrl") or d.get("image")
                 cards.append(
                     {
                         "kind": kind,
@@ -140,15 +177,17 @@ def _extract_cards(widgets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "rating": d.get("rating"),
                         "review_score": reviews.get("score"),
                         "review_count": reviews.get("count") or d.get("review_count"),
-                        "price": _price_label(pricing, d),
+                        "price": price,
                         "detail": flight_detail,
                         "city": address.get("city") or d.get("localityName"),
                         "area": address.get("area"),
                         "id": d.get("id") or d.get("propertyId") or d.get("placeId") or d.get("flightId"),
-                        "link": _full_url(
-                            d.get("propertyLink") or d.get("navUrl") or d.get("bookingUrl") or ""
-                        )
-                        or None,
+                        "link": _card_link(d),
+                        "category": d.get("displayCategory") or d.get("place_type"),
+                        "place_id": d.get("placeId"),
+                        "latitude": d.get("latitude"),
+                        "longitude": d.get("longitude"),
+                        "image": _full_url(image) if isinstance(image, str) else None,
                     }
                 )
     return cards
@@ -174,12 +213,92 @@ def _format_card(index: int, card: dict[str, Any]) -> str:
     if card.get("reason"):
         bits.append(f"— {card['reason']}")
     line = " ".join(bits)
+    meta: list[str] = []
+    if isinstance(card.get("latitude"), (int, float)) and isinstance(card.get("longitude"), (int, float)):
+        meta.append(f"📍 {card['latitude']}, {card['longitude']}")
+    if card.get("place_id"):
+        meta.append(f"place_id={card['place_id']}")
     if card.get("link"):
-        line += f"\n   → {card['link']}"
+        meta.append(f"→ {card['link']}")
+    if meta:
+        line += "\n   " + " · ".join(meta)
     return line
 
 
+def _money(price: dict[str, Any]) -> str:
+    amount = price.get("amount")
+    symbol = str(price.get("currencySymbol") or price.get("currencyCode") or "")
+    if price.get("currencySymbol") and price.get("currencySymbolLocation") != "end":
+        return f"{symbol}{amount}"
+    if price.get("currencySymbol"):
+        return f"{amount}{symbol}"
+    return f"{amount} {symbol}".strip()
+
+
+def _format_itinerary_summary(props: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for item in props.get("itinerary") or []:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("plan") or "Untitled"
+        plan = item.get("plan")
+        day = item.get("day")
+        heading = f"Day {day} — {title}" if day else str(title)
+        if plan and plan != title:
+            lines.append(f"{heading}\n{plan}")
+        else:
+            lines.append(heading)
+    summary = props.get("priceSummary") if isinstance(props.get("priceSummary"), dict) else {}
+    prices: list[str] = []
+    flights = summary.get("flights") if isinstance(summary.get("flights"), dict) else {}
+    stays = summary.get("stays") if isinstance(summary.get("stays"), dict) else {}
+    if flights.get("amount") is not None:
+        prices.append(f"{_money(flights)} flights")
+    if stays.get("amount") is not None:
+        stay = _money(stays)
+        if stays.get("unit") == "PER_NIGHT":
+            stay += " / night stays"
+        else:
+            stay += " stays"
+        prices.append(stay)
+    if prices:
+        lines.append("Price summary: " + " · ".join(prices))
+    return "\n".join(lines)
+
+
+def _pill_heading(label: str, pill: dict[str, Any]) -> str:
+    if pill.get("originCity") and pill.get("destinationCity"):
+        route = f"{pill['originCity']} → {pill['destinationCity']}"
+    else:
+        route = pill.get("city")
+    return f"{label} — {route}" if route else label
+
+
+def _format_recommendations(props: dict[str, Any]) -> str:
+    sections: list[str] = []
+    children = props.get("childMfes") if isinstance(props.get("childMfes"), dict) else {}
+    for child in children.values():
+        if not isinstance(child, dict):
+            continue
+        label = str(child.get("label") or "Recommendations")
+        for pill in child.get("pills") or []:
+            if not isinstance(pill, dict):
+                continue
+            cards = _extract_cards([{"content": {"renderprops": pill.get("renderprops") or {}}}])
+            block = "\n".join(_format_card(i, card) for i, card in enumerate(cards, 1))
+            if block:
+                sections.append(_pill_heading(label, pill) + "\n" + block)
+    return "\n\n".join(sections)
+
+
 def _format_widget(widget: dict[str, Any]) -> str:
+    props = _renderprops(widget)
+    if props is None:
+        return ""
+    if isinstance(props.get("itinerary"), list):
+        return _format_itinerary_summary(props)
+    if isinstance(props.get("childMfes"), dict):
+        return _format_recommendations(props)
     cards = _extract_cards([widget])
     return "\n".join(_format_card(i, card) for i, card in enumerate(cards, 1))
 
