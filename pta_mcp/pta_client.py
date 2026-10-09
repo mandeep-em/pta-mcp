@@ -97,9 +97,10 @@ def collect_response(events: list[dict[str, Any]]) -> PtaResponse:
 class PtaClient:
     """Thin client over the PTA Chat HTTP API."""
 
-    def __init__(self, cookie_file: str | pathlib.Path, timeout: float = 120.0) -> None:
+    def __init__(self, cookie_file: str | pathlib.Path, timeout: float = 180.0) -> None:
         self._cookie_file = pathlib.Path(cookie_file)
         self._cookies = self._load_cookies()
+        # read covers quiet gaps in the SSE stream, not the whole search.
         self._client = httpx.Client(
             headers={
                 "user-agent": UA,
@@ -109,7 +110,7 @@ class PtaClient:
                 "referer": "https://www.agoda.com/pta/chat",
                 "cookie": self._cookies,
             },
-            timeout=timeout,
+            timeout=httpx.Timeout(connect=30.0, read=timeout, write=30.0, pool=30.0),
         )
 
     def _load_cookies(self) -> str:
