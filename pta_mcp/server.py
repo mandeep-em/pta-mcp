@@ -46,18 +46,17 @@ def _full_url(link: str) -> str:
 def _card_link(data: dict[str, Any], kind: str | None = None) -> str | None:
     """Best available URL for a card.
 
-    Priority: hotel property link -> flight booking URL -> Google Maps
-    place link (from placeId, as ?cid=) -> activity detail URL (from
-    activity id) -> Agoda place URL (from placeToken) -> Google Maps
-    from coordinates.
+    Priority: hotel property link -> flight booking URL -> Agoda place
+    URL (from placeToken) -> activity detail URL (from activity id) ->
+    Google Maps link from coordinates/placeId.
     """
     link = data.get("propertyLink") or data.get("navUrl") or data.get("bookingUrl")
     if link:
         return _full_url(link)
-    place_id = data.get("placeId")
-    if isinstance(place_id, str) and place_id:
-        return f"https://www.google.com/maps?cid={place_id}"
-    # Activities carry no link/placeId; build a detail URL from the activity id + city context.
+    place_token = data.get("placeToken")
+    if isinstance(place_token, str) and place_token:
+        return f"https://www.agoda.com/place/{place_token}"
+    # Activities carry no link/token; build a detail URL from the activity id + city context.
     activity_id = data.get("id")
     cat = str(kind or data.get("place_type") or data.get("displayCategory") or "").upper()
     if activity_id and cat == "ACTIVITY":
@@ -67,13 +66,13 @@ def _card_link(data: dict[str, Any], kind: str | None = None) -> str | None:
         if data.get("currency"):
             params.append(f"currency={data['currency']}")
         return "https://www.agoda.com/activities/detail?" + "&".join(params)
-    place_token = data.get("placeToken")
-    if isinstance(place_token, str) and place_token:
-        return f"https://www.agoda.com/place/{place_token}"
     lat = data.get("latitude")
     lng = data.get("longitude")
     if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
         return f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"
+    place_id = data.get("placeId")
+    if isinstance(place_id, str) and place_id:
+        return f"https://www.google.com/maps?cid={place_id}"
     return None
 
 
