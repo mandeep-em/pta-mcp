@@ -43,11 +43,12 @@ def _full_url(link: str) -> str:
     return "https://www.agoda.com" + link
 
 
-def _card_link(data: dict[str, Any]) -> str | None:
+def _card_link(data: dict[str, Any], kind: str | None = None) -> str | None:
     """Best available URL for a card.
 
     Priority: hotel property link -> flight booking URL -> Agoda place URL
-    (built from placeToken) -> Google Maps link from coordinates/placeId.
+    (built from placeToken) -> activity detail URL (from activity id) ->
+    Google Maps link from coordinates/placeId.
     """
     link = data.get("propertyLink") or data.get("navUrl") or data.get("bookingUrl")
     if link:
@@ -55,6 +56,16 @@ def _card_link(data: dict[str, Any]) -> str | None:
     place_token = data.get("placeToken")
     if isinstance(place_token, str) and place_token:
         return f"https://www.agoda.com/place/{place_token}"
+    # Activities carry no link/token; build a detail URL from the activity id + city context.
+    activity_id = data.get("id")
+    cat = str(kind or data.get("place_type") or data.get("displayCategory") or "").upper()
+    if activity_id and cat == "ACTIVITY":
+        params = [f"activityId={activity_id}"]
+        if data.get("cityId"):
+            params.append(f"cityId={data['cityId']}")
+        if data.get("currency"):
+            params.append(f"currency={data['currency']}")
+        return "https://www.agoda.com/activities/detail?" + "&".join(params)
     lat = data.get("latitude")
     lng = data.get("longitude")
     if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
@@ -169,6 +180,7 @@ def _extract_cards(widgets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     currency = d.get("currency")
                     price = f"{amount} {currency}".strip() if currency else str(amount)
                 image = d.get("imageUrl") or d.get("image")
+                review_count = reviews.get("count") or d.get("review_count") or d.get("numberOfRatings")
                 cards.append(
                     {
                         "kind": kind,
@@ -176,13 +188,13 @@ def _extract_cards(widgets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "reason": _card_reason(item, d),
                         "rating": d.get("rating"),
                         "review_score": reviews.get("score"),
-                        "review_count": reviews.get("count") or d.get("review_count"),
+                        "review_count": review_count,
                         "price": price,
                         "detail": flight_detail,
-                        "city": address.get("city") or d.get("localityName"),
+                        "city": address.get("city") or d.get("localityName") or d.get("cityName"),
                         "area": address.get("area"),
                         "id": d.get("id") or d.get("propertyId") or d.get("placeId") or d.get("flightId"),
-                        "link": _card_link(d),
+                        "link": _card_link(d, kind),
                         "category": d.get("displayCategory") or d.get("place_type"),
                         "place_id": d.get("placeId"),
                         "latitude": d.get("latitude"),
@@ -204,6 +216,8 @@ def _format_card(index: int, card: dict[str, Any]) -> str:
         if card.get("review_count"):
             review += f" ({card['review_count']} reviews)"
         bits.append(review)
+    elif card.get("review_count"):
+        bits.append(f"· {card['review_count']} reviews")
     if card.get("price"):
         bits.append(f"· {card['price']}")
     if card.get("detail"):
