@@ -31,6 +31,69 @@ class PtaResponse:
     raw_events: int = 0
 
 
+def _is_final_agent_message(evt: dict[str, Any]) -> bool:
+    """The completed assistant reply is one event, not the streamed chunks."""
+    return (
+        evt.get("role") == "Agent"
+        and str(evt.get("type") or "").lower() == "message"
+        and bool(evt.get("isFinal"))
+    )
+
+
+def collect_response(events: list[dict[str, Any]]) -> PtaResponse:
+    """Build a reply from the SSE stream.
+
+    When an Agent message with isFinal=true is present, that event is the
+    full message: its text and content.widgetData replace streamed chunks
+    and earlier widget events.
+    """
+    accumulated: list[str] = []
+    fallback_widgets: list[dict[str, Any]] = []
+    final_evt: dict[str, Any] | None = None
+    message_id: int | None = None
+    parent_id: int | None = None
+
+    for evt in events:
+        role = evt.get("role")
+        etype = str(evt.get("type") or "")
+        content = evt.get("content") if isinstance(evt.get("content"), dict) else {}
+        chunk = content.get("text") or ""
+
+        if role == "Receipt" and parent_id is None:
+            parent_id = evt.get("parentMessageId")
+
+        if _is_final_agent_message(evt):
+            final_evt = evt
+            message_id = evt.get("id")
+            continue
+
+        if role == "Agent" and etype.lower() == "message":
+            if chunk:
+                accumulated.append(chunk)
+            continue
+
+        if role == "Agent" and etype and etype.lower() != "message":
+            fallback_widgets.append(evt)
+
+    if final_evt is not None:
+        content = final_evt.get("content") if isinstance(final_evt.get("content"), dict) else {}
+        text_out = content.get("text") or ""
+        widget_data = content.get("widgetData")
+        widgets = widget_data if isinstance(widget_data, list) else fallback_widgets
+        message_id = final_evt.get("id") or message_id
+    else:
+        text_out = "".join(accumulated)
+        widgets = fallback_widgets
+
+    return PtaResponse(
+        text=text_out,
+        message_id=message_id,
+        parent_message_id=parent_id,
+        widgets=widgets,
+        raw_events=len(events),
+    )
+
+
 class PtaClient:
     """Thin client over the PTA Chat HTTP API."""
 
@@ -94,12 +157,7 @@ class PtaClient:
             "accept": "text/event-stream,application/json, text/plain, */*",
         }
 
-        accumulated: list[str] = []
-        final_text: str | None = None
-        message_id: int | None = None
-        parent_id: int | None = None
-        widgets: list[dict[str, Any]] = []
-        events = 0
+        events: list[dict[str, Any]] = []
 
         with self._client.stream("POST", url, json=body, headers=headers) as r:
             if r.status_code != 200:
@@ -115,43 +173,10 @@ class PtaClient:
                     evt = json.loads(payload)
                 except json.JSONDecodeError:
                     continue
-                events += 1
-                role = evt.get("role")
-                etype = evt.get("type")
-                is_final = evt.get("isFinal", False)
-                content = evt.get("content") or {}
-                chunk = content.get("text") or ""
+                if isinstance(evt, dict):
+                    events.append(evt)
 
-                if role == "Receipt" and parent_id is None:
-                    parent_id = evt.get("parentMessageId")
-
-                if role == "Agent" and etype == "Message":
-                    if chunk:
-                        accumulated.append(chunk)
-                    # a message event may embed widget cards in content.widgetData
-                    # (the isFinal summary typically carries the hotel cards here)
-                    wd = content.get("widgetData") if isinstance(content, dict) else None
-                    if isinstance(wd, list):
-                        widgets.extend(wd)
-                    if is_final:
-                        final_text = chunk if chunk else final_text
-                        message_id = evt.get("id")
-                        # final event may also carry widgets in context
-                        ctx = evt.get("context") or {}
-                        if isinstance(ctx, dict) and ctx.get("widgets"):
-                            widgets.extend(ctx["widgets"])
-                elif role == "Agent" and etype and etype != "Message":
-                    # non-text agent events (e.g. widget cards) — capture
-                    widgets.append(evt)
-
-        text_out = final_text if final_text is not None else "".join(accumulated)
-        return PtaResponse(
-            text=text_out,
-            message_id=message_id,
-            parent_message_id=parent_id,
-            widgets=widgets,
-            raw_events=events,
-        )
+        return collect_response(events)
 
     def plan_trip(self, message: str, title: str = "Trip plan") -> PtaResponse:
         """Convenience: create conversation + send one message + return buffered reply."""

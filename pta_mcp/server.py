@@ -35,6 +35,33 @@ def _get_client() -> PtaClient:
     return _client
 
 
+def _full_url(link: str) -> str:
+    """Turn a relative Agoda path into an absolute URL."""
+    link = link.strip()
+    if not link:
+        return link
+    if link.startswith(("http://", "https://")):
+        return link
+    if link.startswith("//"):
+        return "https:" + link
+    if link.startswith("www."):
+        return "https://" + link
+    if not link.startswith("/"):
+        link = "/" + link
+    return "https://www.agoda.com" + link
+
+
+def _renderprops(widget: dict[str, Any]) -> dict[str, Any] | None:
+    """Widget cards arrive either as WidgetData events or embedded on the final message."""
+    if widget.get("type") not in (None, "WidgetData"):
+        return None
+    content = widget.get("content")
+    if not isinstance(content, dict):
+        return None
+    props = content.get("renderprops")
+    return props if isinstance(props, dict) else None
+
+
 def _extract_cards(widgets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pull clean card summaries out of WidgetData events.
 
@@ -43,9 +70,9 @@ def _extract_cards(widgets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     cards: list[dict[str, Any]] = []
     for w in widgets:
-        if w.get("type") != "WidgetData":
+        props = _renderprops(w)
+        if props is None:
             continue
-        props = (w.get("content") or {}).get("renderprops") or {}
         # candidate list-valued keys holding card arrays
         list_keys = [k for k, v in props.items() if isinstance(v, list)]
         for key in list_keys:
@@ -70,8 +97,11 @@ def _extract_cards(widgets: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "price": pricing.get("displayPrice") or pricing.get("price") or d.get("price"),
                         "city": address.get("city") or d.get("localityName"),
                         "area": address.get("area"),
-                        "id": d.get("id") or d.get("propertyId") or d.get("placeId"),
-                        "link": d.get("propertyLink"),
+                        "id": d.get("id") or d.get("propertyId") or d.get("placeId") or d.get("flightId"),
+                        "link": _full_url(
+                            d.get("propertyLink") or d.get("navUrl") or d.get("bookingUrl") or ""
+                        )
+                        or None,
                     }
                 )
     return cards
@@ -102,10 +132,7 @@ def _format_response(resp: PtaResponse) -> str:
             if c.get("reason"):
                 bits.append(f"— {c['reason']}")
             if c.get("link"):
-                link = c["link"]
-                if link.startswith("/"):
-                    link = "https://www.agoda.com" + link
-                bits.append(f"→ {link}")
+                bits.append(f"→ {c['link']}")
             parts.append(" ".join(bits))
     if not parts:
         parts.append("(no response text received)")
