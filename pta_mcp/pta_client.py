@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -159,25 +160,63 @@ class PtaClient:
         }
 
         events: list[dict[str, Any]] = []
+        dropped = False
+        try:
+            with self._client.stream("POST", url, json=body, headers=headers) as r:
+                if r.status_code != 200:
+                    body_text = r.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(f"send_message failed ({r.status_code}): {body_text[:500]}")
+                for line in r.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:"):].strip()
+                    if not payload:
+                        continue
+                    try:
+                        evt = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(evt, dict):
+                        events.append(evt)
+        except httpx.RemoteProtocolError:
+            # Agoda closed the SSE stream early (seen from hosted IPs where the
+            # cookie session's geo does not match the egress IP). The backend
+            # usually keeps generating and stores the completed reply, so we
+            # fall back to polling the conversation's stored messages.
+            dropped = True
 
-        with self._client.stream("POST", url, json=body, headers=headers) as r:
-            if r.status_code != 200:
-                body_text = r.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"send_message failed ({r.status_code}): {body_text[:500]}")
-            for line in r.iter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                payload = line[len("data:"):].strip()
-                if not payload:
-                    continue
-                try:
-                    evt = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(evt, dict):
-                    events.append(evt)
+        resp = collect_response(events)
+        if resp.message_id is not None and not dropped:
+            return resp
+        # No final Agent message arrived over SSE: poll the stored messages
+        # endpoint until the completed reply shows up.
+        return self._poll_final_response(conversation_id)
 
-        return collect_response(events)
+    def fetch_messages(self, conversation_id: int) -> list[dict[str, Any]]:
+        """Fetch the stored messages for a conversation (GET endpoint)."""
+        url = f"{CREATE_URL}/{conversation_id}/messages"
+        r = self._client.get(url, headers={"accept": "application/json, text/plain, */*"})
+        r.raise_for_status()
+        data = r.json()
+        return data.get("messages", []) if isinstance(data, dict) else []
+
+    def _poll_final_response(
+        self, conversation_id: int, timeout: float = 120.0, interval: float = 3.0
+    ) -> PtaResponse:
+        """Poll the stored-messages endpoint until the completed Agent reply appears."""
+        deadline = time.monotonic() + timeout
+        last_messages: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            try:
+                messages = self.fetch_messages(conversation_id)
+            except Exception:
+                messages = []
+            last_messages = messages
+            if any(m.get("role") == "Agent" and m.get("isFinal") for m in messages):
+                return collect_response(messages)
+            time.sleep(interval)
+        # Return whatever was stored, even if no isFinal flag arrived in time.
+        return collect_response(last_messages)
 
     def plan_trip(self, message: str, title: str = "Trip plan") -> PtaResponse:
         """Convenience: create conversation + send one message + return buffered reply."""
