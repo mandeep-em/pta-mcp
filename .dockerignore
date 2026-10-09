@@ -1,0 +1,8 @@
+.git
+.gitignore
+recon
+secrets
+**/__pycache__
+**/*.pyc
+*.md
+.venv

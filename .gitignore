@@ -1,0 +1,29 @@
+# Secrets — NEVER commit
+secrets/
+.env
+.env.*
+*.cookies
+cookies.txt
+cookies.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Playwright
+.playwright/
+
+# OS
+.DS_Store
+
+# Recon data artifacts (keep scripts, ignore large/sensitive outputs)
+recon/*.json
+recon/*.bin
+recon/*.png
+recon/*.html
+recon/js_*.txt
